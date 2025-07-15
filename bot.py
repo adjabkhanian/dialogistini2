@@ -1,6 +1,6 @@
 import logging
 from aiogram import Bot, Dispatcher, F, types
-from aiogram.types import Message, KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import Message, KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ParseMode
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -26,6 +26,8 @@ dp = Dispatcher(storage=MemoryStorage())
 # Состояния
 class Form(StatesGroup):
     waiting_for_email = State()
+    waiting_for_fullname = State()
+    waiting_for_knowledge_choice = State()
 
 
 @dp.message(F.text == "/start")
@@ -44,25 +46,51 @@ async def get_contact(message: Message, state: FSMContext):
 
 @dp.message(Form.waiting_for_email)
 async def get_email(message: Message, state: FSMContext):
-    user_data = await state.get_data()
-    phone = user_data.get("phone")
-    email = message.text
-    user_id = message.from_user.id
-    username = message.from_user.username or ""
-    now = datetime.now().isoformat()
+    await state.update_data(email=message.text)
+    await message.answer("Как вас зовут? Напишите имя и фамилию:")
+    await state.set_state(Form.waiting_for_fullname)
 
-    # Сохранение в Airtable
-    table.create({
-        "Telegram ID": str(user_id),
-        "Username": username,
-        "Phone": phone,
-        "Email": email,
-        "Registered At": now
-    })
 
-    await message.answer(
-        "✅ Спасибо! Теперь можешь перейти в наш канал:\n"
-        + hlink("👉 Перейти в канал", "https://t.me/dialogistiny_official"),
+@dp.message(Form.waiting_for_fullname)
+async def get_fullname(message: Message, state: FSMContext):
+    await state.update_data(fullname=message.text)
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📘 Для себя", callback_data="self")],
+        [InlineKeyboardButton(text="📗 Для себя и других", callback_data="both")],
+        [InlineKeyboardButton(text="👀 Просто наблюдать", callback_data="observe")]
+    ])
+
+    await message.answer("Вы хотите религиозные знания:", reply_markup=keyboard)
+    await state.set_state(Form.waiting_for_knowledge_choice)
+
+
+@dp.callback_query(Form.waiting_for_knowledge_choice)
+async def process_choice(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await callback.answer()
+
+    choice_map = {
+        "self": "Получать для себя и внедрять их",
+        "both": "Получать, внедрять и передавать другим",
+        "observe": "Хочу пока просто понаблюдать"
+    }
+
+    full_data = {
+        "Telegram ID": str(callback.from_user.id),
+        "Username": callback.from_user.username or "",
+        "Phone": data.get("phone"),
+        "Email": data.get("email"),
+        "Full Name": data.get("fullname"),
+        "Knowledge Intention": choice_map.get(callback.data),
+        "Registered At": datetime.now().isoformat()
+    }
+
+    table.create(full_data)
+
+    await callback.message.answer(
+        "✅ Спасибо! Теперь можешь перейти в наш канал:\n" +
+        hlink("👉 Перейти в канал", "https://t.me/dialogistiny_official"),
         reply_markup=types.ReplyKeyboardRemove()
     )
     await state.clear()
@@ -77,9 +105,9 @@ async def send_all(message: Message):
     if not text:
         return await message.answer("⚠️ Введите текст рассылки. Пример:\n/sendall Привет, это рассылка!")
 
-    # Получение всех пользователей
     records = table.all()
     success = 0
+
     for record in records:
         user_id = record['fields'].get("Telegram ID")
         if user_id:
